@@ -11,24 +11,39 @@ A macOS system-wide media playback monitor that publishes real-time events over 
 - 🎯 **Track Change Detection** - Filters out duplicate events
 - 📊 **Structured Events** - Clean JSON format with full metadata
 - ⚡ **Instant State** - New clients receive current playback state immediately
-- 🔄 **Periodic Updates** - Automatic state updates every 5 seconds
+- 🔄 **Periodic Updates** - Heartbeat every 15 seconds with last known state
+- 🛡️ **Robust** - Exception handling and thread-safe operations
 
 ## Quick Start
 
-### Option 1: Homebrew Service (Recommended)
+### Option 1: Homebrew Tap (Recommended)
 
 ```bash
-# Install via Homebrew
-./install_local.sh
+# Add the tap
+brew tap yourusername/media
 
-# Start as a background service
+# Install media listener
+brew install media-listener
+
+# Start the service
 brew services start media-listener
 
-# Connect to the socket
-nc -U /tmp/media_listener.sock
+# Optional: Install SketchyBar integration
+brew install sketchybar-media-listener
+brew services start sketchybar-media-listener
 ```
 
-### Option 2: Manual Build
+### Option 2: Local Development Install
+
+```bash
+# Install from local formula
+brew install --build-from-source --HEAD Formula/media-listener.rb
+
+# Start service
+brew services start media-listener
+```
+
+### Option 3: Manual Build
 
 ```bash
 # Build
@@ -40,19 +55,23 @@ make
 
 ## Installation
 
-### Homebrew
+### Homebrew Tap
 
-See [HOMEBREW.md](HOMEBREW.md) for detailed Homebrew installation and service management.
+The recommended way to install is via Homebrew tap:
 
 ```bash
-# Quick install
-brew install --build-from-source ./media-listener.rb
+brew tap yourusername/media
+brew install media-listener
 
-# Start service
-brew services start media-listener
+# Optional: SketchyBar integration
+brew install sketchybar-media-listener
 ```
 
-### Manual
+See [TAP_SETUP.md](TAP_SETUP.md) for creating your own tap.
+
+### Local Development
+
+For development or contributing:
 
 ```bash
 # Clone repository
@@ -224,9 +243,17 @@ Edit `main.m` line 9:
 static const NSTimeInterval DEBOUNCE_INTERVAL = 0.5; // 500ms
 ```
 
-### Socket Path
+### State Update Interval
 
 Edit `main.m` line 10:
+
+```objc
+static const NSTimeInterval STATE_UPDATE_INTERVAL = 15.0; // 15 seconds
+```
+
+### Socket Path
+
+Edit `main.m` line 11:
 
 ```objc
 static NSString * const SOCKET_PATH = @"/tmp/media_listener.sock";

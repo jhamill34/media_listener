@@ -129,18 +129,115 @@ void broadcastJSON(NSDictionary *data) {
 }
 
 void sendCurrentStateToClient(int clientFd) {
-    dispatch_async(socketQueue, ^{
-        if (!currentStateCache || [currentStateCache count] == 0) {
-            printf("[DEBUG] No cached state available to send to client %d\n", clientFd);
-            return;
+    // Copy the fd to avoid any threading issues
+    int fd = clientFd;
+
+    printf("[DEBUG] Requesting fresh state for client %d\n", fd);
+
+    // Fetch fresh now playing info on the callback queue
+    dispatch_async(callbackQueue, ^{
+        @try {
+            printf("[DEBUG] Calling MRMediaRemoteGetNowPlayingInfo...\n");
+            MRMediaRemoteGetNowPlayingInfo(callbackQueue, ^(CFDictionaryRef infoRef) {
+                @try {
+                    printf("[DEBUG] MRMediaRemoteGetNowPlayingInfo callback invoked\n");
+
+                    // Build the state event
+                    NSMutableDictionary *stateEvent = [NSMutableDictionary dictionary];
+                    stateEvent[@"event_type"] = @"current_state";
+                    stateEvent[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+
+                    // Extract track info if available
+                    if (infoRef) {
+                        printf("[DEBUG] infoRef is not NULL\n");
+                        CFRetain(infoRef);
+                        NSDictionary *nsDict = (__bridge NSDictionary *)infoRef;
+
+                        if (nsDict && [nsDict isKindOfClass:[NSDictionary class]]) {
+                            printf("[DEBUG] nsDict is valid, has %lu keys\n", (unsigned long)[nsDict count]);
+
+                            // Debug: print all keys
+                            printf("[DEBUG] Available keys:\n");
+                            for (id key in nsDict) {
+                                printf("[DEBUG]   - %s\n", [[key description] UTF8String]);
+                            }
+
+                            NSMutableDictionary *trackInfo = [NSMutableDictionary dictionary];
+
+                            NSString *title = nsDict[kMRMediaRemoteNowPlayingInfoTitle];
+                            NSString *artist = nsDict[kMRMediaRemoteNowPlayingInfoArtist];
+                            NSString *album = nsDict[kMRMediaRemoteNowPlayingInfoAlbum];
+
+                            if (title) {
+                                trackInfo[@"title"] = title;
+                                printf("[DEBUG] Title: %s\n", [title UTF8String]);
+                            }
+                            if (artist) {
+                                trackInfo[@"artist"] = artist;
+                                printf("[DEBUG] Artist: %s\n", [artist UTF8String]);
+                            }
+                            if (album) trackInfo[@"album"] = album;
+
+                            id duration = nsDict[kMRMediaRemoteNowPlayingInfoDuration];
+                            id elapsed = nsDict[kMRMediaRemoteNowPlayingInfoElapsedTime];
+                            id rate = nsDict[kMRMediaRemoteNowPlayingInfoPlaybackRate];
+
+                            printf("[DEBUG] Raw values - duration: %s, elapsed: %s, rate: %s\n",
+                                   duration ? [[duration description] UTF8String] : "nil",
+                                   elapsed ? [[elapsed description] UTF8String] : "nil",
+                                   rate ? [[rate description] UTF8String] : "nil");
+
+                            if (duration) trackInfo[@"duration"] = duration;
+                            if (elapsed) trackInfo[@"elapsed"] = elapsed;
+                            if (rate) trackInfo[@"playback_rate"] = rate;
+
+                            if ([trackInfo count] > 0) {
+                                stateEvent[@"track_info"] = trackInfo;
+                                printf("[DEBUG] Added %lu track info fields\n", (unsigned long)[trackInfo count]);
+                            }
+
+                            if (elapsed && duration) {
+                                printf("[DEBUG] Fresh state - elapsed: %.1fs / %.1fs\n",
+                                       [elapsed doubleValue], [duration doubleValue]);
+                            }
+                        } else {
+                            printf("[DEBUG] nsDict is NULL or not a dictionary\n");
+                        }
+
+                        CFRelease(infoRef);
+                    } else {
+                        printf("[DEBUG] infoRef is NULL\n");
+                    }
+
+                    // Add cached app info (playback state, app name, pid)
+                    if (currentStateCache) {
+                        printf("[DEBUG] Adding cached app info\n");
+                        if (currentStateCache[@"app_name"]) {
+                            stateEvent[@"app_name"] = currentStateCache[@"app_name"];
+                        }
+                        if (currentStateCache[@"playback_state"]) {
+                            stateEvent[@"playback_state"] = currentStateCache[@"playback_state"];
+                        }
+                        if (currentStateCache[@"app_pid"]) {
+                            stateEvent[@"app_pid"] = currentStateCache[@"app_pid"];
+                        }
+                    }
+
+                    printf("[DEBUG] Final state event has %lu keys\n", (unsigned long)[stateEvent count]);
+
+                    // Send on socket queue
+                    dispatch_async(socketQueue, ^{
+                        sendJSONToClient(fd, stateEvent);
+                        printf("[INFO] Sent fresh state to client %d\n", fd);
+                    });
+                } @catch (NSException *exception) {
+                    printf("[ERROR] Exception in state callback: %s\n", [[exception description] UTF8String]);
+                }
+            });
+            printf("[DEBUG] MRMediaRemoteGetNowPlayingInfo call completed (async)\n");
+        } @catch (NSException *exception) {
+            printf("[ERROR] Exception fetching state: %s\n", [[exception description] UTF8String]);
         }
-
-        NSMutableDictionary *stateEvent = [currentStateCache mutableCopy];
-        stateEvent[@"event_type"] = @"current_state";
-        stateEvent[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
-
-        sendJSONToClient(clientFd, stateEvent);
-        printf("[INFO] Sent current state to client %d\n", clientFd);
     });
 }
 
@@ -227,33 +324,39 @@ void setupSocketServer(void) {
     printf("[DEBUG] Dispatch source resumed\n");
 
     // Setup periodic state updates
-    periodicTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                          dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
-    if (periodicTimer) {
-        dispatch_source_set_timer(periodicTimer,
-                                 dispatch_time(DISPATCH_TIME_NOW, STATE_UPDATE_INTERVAL * NSEC_PER_SEC),
-                                 STATE_UPDATE_INTERVAL * NSEC_PER_SEC,
-                                 0.5 * NSEC_PER_SEC);
-
-        dispatch_source_set_event_handler(periodicTimer, ^{
-            dispatch_async(socketQueue, ^{
-                if ([clientSockets count] == 0) {
-                    return;
-                }
-
-                printf("[DEBUG] Periodic state update triggered\n");
-
-                // Broadcast current state to all connected clients
-                for (NSNumber *clientNum in [clientSockets copy]) {
-                    int clientFd = [clientNum intValue];
-                    sendCurrentStateToClient(clientFd);
-                }
-            });
-        });
-
-        dispatch_resume(periodicTimer);
-        printf("[DEBUG] Periodic timer started (interval: %.0fs)\n", STATE_UPDATE_INTERVAL);
-    }
+    // periodicTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+    //                                       dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+    // if (periodicTimer) {
+    //     dispatch_source_set_timer(periodicTimer,
+    //                              dispatch_time(DISPATCH_TIME_NOW, STATE_UPDATE_INTERVAL * NSEC_PER_SEC),
+    //                              STATE_UPDATE_INTERVAL * NSEC_PER_SEC,
+    //                              0.5 * NSEC_PER_SEC);
+    //
+    //     dispatch_source_set_event_handler(periodicTimer, ^{
+    //         dispatch_async(socketQueue, ^{
+    //             if ([clientSockets count] == 0) {
+    //                 return;
+    //             }
+    //
+    //             printf("[DEBUG] Periodic state update triggered for %lu clients\n",
+    //                    (unsigned long)[clientSockets count]);
+    //
+    //             // Broadcast current state to all connected clients
+    //             // Make a copy to avoid mutation during iteration
+    //             NSArray *clientsCopy = [clientSockets copy];
+    //             for (NSNumber *clientNum in clientsCopy) {
+    //                 int clientFd = [clientNum intValue];
+    //                 // Verify client is still connected before sending
+    //                 if ([clientSockets containsObject:clientNum]) {
+    //                     sendCurrentStateToClient(clientFd);
+    //                 }
+    //             }
+    //         });
+    //     });
+    //
+    //     dispatch_resume(periodicTimer);
+    //     printf("[DEBUG] Periodic timer started (interval: %.0fs)\n", STATE_UPDATE_INTERVAL);
+    // }
 }
 
 void cleanupSocketServer(void) {
@@ -562,7 +665,8 @@ int main(int argc, const char * argv[]) {
         printf("  • Filters out rapid track skipping\n");
         printf("  • Publishes JSON events over UNIX socket\n");
         printf("  • Sends current state on client connect\n");
-        printf("  • Periodic state updates (%.0fs interval)\n", STATE_UPDATE_INTERVAL);
+        printf("  • Periodic fresh state updates (%.0fs interval)\n", STATE_UPDATE_INTERVAL);
+        printf("  • Real-time elapsed time tracking\n");
         printf("\nSocket API:\n");
         printf("  • Path: %s\n", [SOCKET_PATH UTF8String]);
         printf("  • Format: JSON (newline-delimited)\n");
