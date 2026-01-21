@@ -12,5 +12,3 @@ media_listener
 *.dSYM
 *.o
 
-# Homebrew build artifacts
-/headers/
