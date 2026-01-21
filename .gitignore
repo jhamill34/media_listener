@@ -8,7 +8,6 @@ DerivedData/
 .netrc
 
 # Objective-C build artifacts
-media_listener
 *.dSYM
 *.o
 
