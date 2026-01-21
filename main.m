@@ -3,7 +3,7 @@
 #import <sys/un.h>
 #import <unistd.h>
 #import <errno.h>
-#import "headers/MediaRemote.h"
+#import "Includes/MediaRemote.h"
 
 // Configuration
 static const NSTimeInterval DEBOUNCE_INTERVAL = 0.5; // 500ms debounce
